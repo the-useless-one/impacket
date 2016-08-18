@@ -23,13 +23,16 @@ import re
 from binascii import unhexlify
 
 from pyasn1.codec.der import decoder, encoder
+from pyasn1.codec.ber import decoder as ber_decoder, encoder as ber_encoder
 from pyasn1.error import SubstrateUnderrunError
+import pyasn1.error
 
 from impacket import LOG
 from impacket.ldap.ldapasn1 import BindRequest, Integer7Bit, LDAPDN, AuthenticationChoice, AuthSimple, LDAPMessage, \
     SCOPE_SUB, SearchRequest, Scope, DEREF_NEVER, DeRefAliases, IntegerPositive, Boolean, AttributeSelection, \
     SaslCredentials, LDAPString, ProtocolOp, Credentials, Filter, SubstringFilter, Present, EqualityMatch, \
-    ApproxMatch, GreaterOrEqual, LessOrEqual, SubStrings, SubString, And, Or, Not
+    ApproxMatch, GreaterOrEqual, LessOrEqual, SubStrings, SubString, And, Or, Not, LDAPOID, Controls, \
+    Control, PagedSearchControlValue, OctetString
 from impacket.ntlm import getNTLMSSPType1, getNTLMSSPType3
 from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
 
@@ -332,10 +335,31 @@ class LDAPConnection:
                 if protocolOp.getName() == 'searchResDone':
                     done = True
                     if protocolOp['searchResDone']['resultCode'] != 0:
-                        raise LDAPSearchError(error=int(protocolOp['searchResDone']['resultCode']),
-                                              errorString='Error in searchRequest -> %s:%s' % (
-                                              protocolOp['searchResDone']['resultCode'].prettyPrint(),
-                                              protocolOp['searchResDone']['diagnosticMessage']), answers=answers)
+                        # If we get a "size limit exceeded" error
+                        if protocolOp['searchResDone']['resultCode'] == 4:
+                            print 'cap hit'
+                            answers = []
+
+                            searchControls = Controls()
+
+                            searchControls[0] = Control()
+                            searchControls[0]['controlType'] = LDAPOID('1.2.840.113556.1.4.319')
+                            searchControls[0]['criticality'] = Boolean(False)
+
+                            realSearchControlValue = PagedSearchControlValue()
+                            realSearchControlValue['size'] = IntegerPositive(1000)
+                            realSearchControlValue['cookie'] = OctetString('')
+
+                            searchControlValue = OctetString(ber_encoder.encode(realSearchControlValue))
+                            searchControls[0]['controlValue'] = searchControlValue
+
+                            resp = self.sendReceive('searchRequest', searchRequest, searchControls)
+                            print 'sent received'
+                        else:
+                            raise LDAPSearchError(error=int(protocolOp['searchResDone']['resultCode']),
+                                                  errorString='Error in searchRequest -> %s:%s' % (
+                                                  protocolOp['searchResDone']['resultCode'].prettyPrint(),
+                                                  protocolOp['searchResDone']['diagnosticMessage']), answers=answers)
                 else:
                     answers.append(item['protocolOp'][protocolOp.getName()])
 
@@ -345,10 +369,12 @@ class LDAPConnection:
         if self._socket is not None:
             self._socket.close()
 
-    def send(self, protocolOp, message):
+    def send(self, protocolOp, message, controls=None):
         ldapMessage = LDAPMessage()
         ldapMessage['messageID'] = IntegerPositive(self._messageId)
         ldapMessage['protocolOp'] = ProtocolOp().setComponentByName(protocolOp, message)
+        if controls:
+            ldapMessage['controls'] = controls
 
         data = encoder.encode(ldapMessage)
 
@@ -372,6 +398,9 @@ class LDAPConnection:
             except SubstrateUnderrunError:
                 # We need more data
                 remaining = data + self._socket.recv(REQUEST_SIZE)
+            except pyasn1.error.PyAsn1Error as e:
+                print data.encode('hex')
+                raise e
             else:
                 answers.append(ldapMessage)
             data = remaining
@@ -379,8 +408,8 @@ class LDAPConnection:
         self._messageId += 1
         return answers
 
-    def sendReceive(self, protocolOp, message):
-        self.send(protocolOp, message)
+    def sendReceive(self, protocolOp, message, controls=None):
+        self.send(protocolOp, message, controls)
         return self.recv()
 
     def parseFilter(self, filterStr):

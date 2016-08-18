@@ -726,3 +726,17 @@ class LDAPMessage(Sequence):
         NamedType('protocolOp', ProtocolOp()),
         OptionalNamedType('controls', Controls())
         )
+
+class PagedSearchControlValue(Sequence):
+    """
+        realSearchControlValue ::= SEQUENCE {
+            size            INTEGER (0..maxInt),
+                                    -- requested page size from client
+                                    -- result set size estimate from server
+            cookie          OCTET STRING }
+                            -- [RFC2696]
+    """
+    componentType = NamedTypes(
+        NamedType('size', IntegerPositive()),
+        NamedType('cookie', OctetString())
+        )
